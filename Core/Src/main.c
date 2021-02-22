@@ -29,6 +29,10 @@
 #include <stdio.h>
 #include "decode.h"
 #include "stb_image_resize.h"
+#include "../../Drivers/BSP/STM32F429I-Discovery/stm32f429i_discovery_sdram.h"
+#include "stm32f4xx_ll_fmc.h"
+#include "stm32f4xx_hal_sdram.h"
+
 //#include "ili9341.h"
 /* USER CODE END Includes */
 
@@ -97,8 +101,6 @@ uint8_t USBDISK_FatFs_is_mounted = 0;
 uint8_t rootDirOpened = 0;
 DIR rootDir;
 FILINFO fileInfo;
-//FIL MyFile;           /* File object */
-//char USBDISKPath[4];  /* USB disk logical drive path */
 
 static uint32_t inAlpha = 0;
 
@@ -107,8 +109,12 @@ static uint32_t decode_buffer_1__width, decode_buffer_1_height = 0;
 uint8_t _aucLine[2048];
 static __IO uint8_t* targetRowPtr = 0;
 
-static FMC_SDRAM_CommandTypeDef command;
-//static DMA2D_HandleTypeDef DMA2DHandle;
+
+// SDRAM
+uint8_t LAYER0_BUFFER[LAYER_SIZE] __attribute__((section(".sdram")));
+uint8_t LAYER1_BUFFER[LAYER_SIZE] __attribute__((section(".sdram")));
+uint8_t DECODE_BUFFER_1[DECODE_BUFFER_SIZE] __attribute__((section(".sdram")));
+uint8_t DECODE_BUFFER_2[DECODE_BUFFER_SIZE] __attribute__((section(".sdram")));
 
 /* USER CODE END PV */
 
@@ -130,65 +136,7 @@ void StartDefaultTask(void const * argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/**
-  * @brief  Perform the SDRAM exernal memory inialization sequence
-  * @param  hsdram: SDRAM handle
-  * @param  Command: Pointer to SDRAM command structure
-  * @retval None
-  */
-static void SDRAM_Initialization_Sequence(SDRAM_HandleTypeDef *hsdram, FMC_SDRAM_CommandTypeDef *Command)
-{
-  __IO uint32_t tmpmrd =0;
-  /* Step 3:  Configure a clock configuration enable command */
-  Command->CommandMode 			 = FMC_SDRAM_CMD_CLK_ENABLE;
-  Command->CommandTarget 		 = FMC_SDRAM_CMD_TARGET_BANK2;
-  Command->AutoRefreshNumber 	 = 1;
-  Command->ModeRegisterDefinition = 0;
 
-  /* Send the command */
-  HAL_SDRAM_SendCommand(hsdram, Command, 0x1000);
-
-  /* Step 4: Insert 100 ms delay */
-  HAL_Delay(100);
-
-  /* Step 5: Configure a PALL (precharge all) command */
-  Command->CommandMode 			 = FMC_SDRAM_CMD_PALL;
-  Command->CommandTarget 	     = FMC_SDRAM_CMD_TARGET_BANK2;
-  Command->AutoRefreshNumber 	 = 1;
-  Command->ModeRegisterDefinition = 0;
-
-  /* Send the command */
-  HAL_SDRAM_SendCommand(hsdram, Command, 0x1000);
-
-  /* Step 6 : Configure a Auto-Refresh command */
-  Command->CommandMode 			 = FMC_SDRAM_CMD_AUTOREFRESH_MODE;
-  Command->CommandTarget 		 = FMC_SDRAM_CMD_TARGET_BANK2;
-  Command->AutoRefreshNumber 	 = 4;
-  Command->ModeRegisterDefinition = 0;
-
-  /* Send the command */
-  HAL_SDRAM_SendCommand(hsdram, Command, 0x1000);
-
-  /* Step 7: Program the external memory mode register */
-  tmpmrd = (uint32_t)SDRAM_MODEREG_BURST_LENGTH_2          |
-                     SDRAM_MODEREG_BURST_TYPE_SEQUENTIAL   |
-                     SDRAM_MODEREG_CAS_LATENCY_3           |
-                     SDRAM_MODEREG_OPERATING_MODE_STANDARD |
-                     SDRAM_MODEREG_WRITEBURST_MODE_SINGLE;
-
-  Command->CommandMode = FMC_SDRAM_CMD_LOAD_MODE;
-  Command->CommandTarget 		 = FMC_SDRAM_CMD_TARGET_BANK2;
-  Command->AutoRefreshNumber 	 = 1;
-  Command->ModeRegisterDefinition = tmpmrd;
-
-  /* Send the command */
-  HAL_SDRAM_SendCommand(hsdram, Command, 0x1000);
-
-  /* Step 8: Set the refresh rate counter */
-  /* (15.62 us x Freq) - 20 */
-  /* Set the device refresh counter */
-  HAL_SDRAM_ProgramRefreshRate(hsdram, REFRESH_COUNT);
-}
 
 /* USER CODE END 0 */
 
@@ -221,19 +169,6 @@ int main(void)
   ili9341_DisplayOff();
 
 
-  /* LCD clock configuration */
-  /* PLLSAI_VCO Input = HSE_VALUE/PLL_M = 1 MHz */
-  /* PLLSAI_VCO Output = PLLSAI_VCO Input * PLLSAIN = 192 MHz */
-  /* PLLLCDCLK = PLLSAI_VCO Output/PLLSAIR = 192/4 = 48 MHz */
-  /* LTDC clock frequency = PLLLCDCLK / RCC_PLLSAIDIVR_8 = 48/8 = 6 MHz */
-  /*RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_LTDC;
-  PeriphClkInitStruct.PLLSAI.PLLSAIN = 192;
-  PeriphClkInitStruct.PLLSAI.PLLSAIR = 4;
-  PeriphClkInitStruct.PLLSAIDivR = RCC_PLLSAIDIVR_8;
-  HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct);*/
-
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -253,8 +188,8 @@ int main(void)
   printf("I/O mapped to UART1\n\r");
 
   printf("Clearing the image buffers\n\r");
-  for (size_t ptr = DECODE_BUFFER_1; ptr <= DECODE_BUFFER_1 + IMAGE_WIDTH * IMAGE_HEIGHT * 3; ptr += 1) {
-	  *(uint8_t*)ptr = 0;
+  for (uint32_t i = 0; i < DECODE_BUFFER_SIZE; i++) {
+	  DECODE_BUFFER_1[i] = 0;
   }
 
   if (HAL_DMA2D_Start(&hdma2d, (uint32_t)DECODE_BUFFER_1, (uint32_t)LAYER0_BUFFER, LCD_WIDTH, LCD_HEIGHT) == HAL_OK)
@@ -268,6 +203,7 @@ int main(void)
 	  HAL_DMA2D_PollForTransfer(&hdma2d, 10);
   }
 
+  printf("Display ON\n\r");
   ili9341_DisplayOn();
 
 
@@ -555,12 +491,12 @@ static void MX_LTDC_Init(void)
   /* USER CODE BEGIN LTDC_Init 2 */
 
   // Reconfiguring the addresses
-  pLayerCfg.FBStartAdress = LAYER0_BUFFER;
+  pLayerCfg.FBStartAdress = (uint32_t)LAYER0_BUFFER;
   if (HAL_LTDC_ConfigLayer(&hltdc, &pLayerCfg, 0) != HAL_OK)
   {
     Error_Handler();
   }
-  pLayerCfg1.FBStartAdress = LAYER1_BUFFER;
+  pLayerCfg1.FBStartAdress = (uint32_t)LAYER1_BUFFER;
   if (HAL_LTDC_ConfigLayer(&hltdc, &pLayerCfg1, 1) != HAL_OK)
   {
     Error_Handler();
@@ -688,7 +624,7 @@ static void MX_FMC_Init(void)
   /* USER CODE BEGIN FMC_Init 2 */
 
   /* Program the SDRAM external device */
-  SDRAM_Initialization_Sequence(&hsdram1, &command);
+  //BSP_SDRAM_Initialization_Sequence(&hsdram1, &command);
 
   /* USER CODE END FMC_Init 2 */
 }
@@ -791,7 +727,7 @@ static void UpdateLTDCLayer2(int layer1_alpha) {
 	pLayerCfg1.Alpha0 = 0;
 	pLayerCfg1.BlendingFactor1 = LTDC_BLENDING_FACTOR1_CA;
 	pLayerCfg1.BlendingFactor2 = LTDC_BLENDING_FACTOR2_CA;
-	pLayerCfg1.FBStartAdress = LAYER1_BUFFER;
+	pLayerCfg1.FBStartAdress = (uint32_t)LAYER1_BUFFER;
 	pLayerCfg1.ImageWidth = LCD_WIDTH;
 	pLayerCfg1.ImageHeight = LCD_HEIGHT;
 	pLayerCfg1.Backcolor.Blue = 0;
